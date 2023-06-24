@@ -1,0 +1,126 @@
+#import streamlit as st
+import gradio as gr
+import shap
+import numpy as np
+import scipy as sp
+import torch
+import tensorflow as tf
+import transformers
+from transformers import pipeline
+from transformers import RobertaTokenizer, RobertaModel
+from transformers import AutoModelForSequenceClassification
+from transformers import AutoConfig
+from transformers import TFAutoModelForSequenceClassification
+from transformers import AutoTokenizer, AutoModelForTokenClassification
+
+import matplotlib
+import matplotlib.pyplot as plt
+import sys
+import csv
+
+csv.field_size_limit(sys.maxsize)
+
+device = "cuda:0" if torch.cuda.is_available() else "cpu"
+
+#Our Tokenizer and Model
+tokenizer = AutoTokenizer.from_pretrained("UVA-MSBA/Mod4_T7")  
+model = AutoModelForSequenceClassification.from_pretrained("UVA-MSBA/Mod4_T7").to(device)
+pipe = transformers.pipeline("text-classification", model=model, tokenizer=tokenizer, top_k=None)
+
+explainer = shap.Explainer(pipe)
+
+model.config.vocab_size = tokenizer.vocab_size
+
+#NER Tokenizer and Model
+ner_tokenizer = AutoTokenizer.from_pretrained("d4data/biomedical-ner-all")
+ner_model = AutoModelForTokenClassification.from_pretrained("d4data/biomedical-ner-all")
+ner_pipe = pipeline("ner", model=ner_model, tokenizer=ner_tokenizer, aggregation_strategy="simple") # pass device=0 if using gpu
+
+
+def adr_predict(x):
+    # ADR Predict Function
+    encoded_input = tokenizer(x, return_tensors='pt')
+    output = model(**encoded_input)
+    scores = output[0][0].detach().numpy()
+    scores = tf.nn.softmax(scores)
+   
+    shap_values = explainer([str(x).lower()])
+    local_plot = shap.plots.text(shap_values[0,:,'LABEL_1'], display=False)
+
+    #NER Fuunction - Highlight
+    ner_output = ner_pipe(x)
+    for d in ner_output:
+        d['entity'] = d.pop('entity_group')
+    
+    #NER Function - htext
+#     res = ner_pipe(x)
+#     entity_colors = {
+#     'Coreference': '#29D93B',
+#     'Severity':'#FCF3CF',
+#     'Sex': '#E9F7EF',
+#     'Sign_symptom': '#EAF2F8',
+#     'Detailed_description': '#078E8B',
+#     'Date': '#F5EEF8',
+#     'History': '#FDEDEC',
+#     'Medication': '#F4F6F6',
+#     'Therapeutic_procedure': '#A3E4D7',
+#     'Age': '#85C1E9',
+#     'Subject': '#D7BDE2',
+#     'Biological_structure': '#AF7AC5',
+#     'Activity': '#B2BABB',
+#     'Lab_value': '#E6B0AA',
+#     'Family_history': '#2471A3',
+#     'Diagnostic_procedure': '#CCD1D1',
+#     'Other_event': '#239B56',
+#     'Occupation': '#B3B6B7'}
+    
+    return {"Severe Reaction": float(scores.numpy()[1]), "Non-severe Reaction": float(scores.numpy()[0])},local_plot,{"text": x, "entities": ner_output} #,htext
+
+def main(prob1):
+    text = str(prob1).lower()
+    obj = adr_predict(text)
+    return obj[0],obj[1],obj[2]
+
+title = "Welcome to ADRIDA"
+description1 = """This app takes text (up to a few sentences) and predicts to what extent the text describes severe (or non-severe) adverse reaction to medications."""
+theme = gr.themes.Soft(
+    primary_hue="slate",
+)
+
+with gr.Blocks(title=title, theme=theme) as demo:
+    gr.Markdown(f"## {title}")
+    gr.Markdown(description1)
+    gr.Markdown("""---""")
+    prob1 = gr.Textbox(label="Enter Your Text Here:",lines=2, placeholder="Type it here ...")
+    with gr.Row():
+        analyze_btn = gr.Button("Analyze Severity")
+
+    with gr.Column(visible=True) as output_col:
+        label = gr.Label(label = "Predicted Label")
+        with gr.Box():
+            local_plot = gr.HTML(label='Shap')
+        highlight = gr.HighlightedText(label='NER')
+
+    analyze_btn.click(
+        main, #function
+        [prob1],
+        [label,
+        local_plot,
+        highlight
+        ],
+        api_name="adr"
+    )
+
+    gr.Markdown("### Click on any of the examples below to predict the severity of the ADR described:")
+    gr.Examples([["70 year-old man felt fatigue and shortness of breath after walking several miles. Light pulse, blood pressure 130/80. Recently prescribed 10mg daily rivaroxaban with aspirin."],
+                 ["30 year-old woman presented with severe rash, nausea, and vomiting after taking ibuprofen and baricitinib. Skin biopsy was performed and lab values showed an elevated eosinophil count."]],
+                [prob1],
+                [label,
+                local_plot,
+                highlight
+                ],
+                main,
+                cache_examples=True
+               )
+    
+demo.launch()
